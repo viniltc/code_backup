@@ -1,0 +1,839 @@
+
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <fstream>  
+#include <string>   
+#include <iostream> 
+
+#ifdef _WIN32
+ #include <windows.h> 
+#else
+ #include <unistd.h>
+#endif
+#include <GL/Glut.h>
+//---------------------------------------------------------------------------
+#include "chai3d.h"
+//---------------------------------------------------------------------------
+
+#include "datarecord.h"
+#include "bll.h" 
+#include "score.h"
+#include <tchar.h>
+//****************************************************
+#include "fsm_exp.h"
+#include "control.h"
+
+//using namespace oring;
+
+//---------------------------------------------------------------------------
+// DECLARED CONSTANTS
+//---------------------------------------------------------------------------
+
+// initial size (width/height) in pixels of the display window
+const int WINDOW_SIZE_W         = 1440;
+const int WINDOW_SIZE_H         = 900;
+
+// mouse menu options (right button)
+const int OPTION_FULLSCREEN     = 1;
+const int OPTION_WINDOWDISPLAY  = 2;
+
+// maximum number of haptic devices supported in this demo
+const int MAX_DEVICES           = 2;
+
+// data logging path
+//char rootdir[] = "d:\\data"; 
+double sampling_rate = 200;   // sampling rate in Hz
+
+const double SPEED_TOL=0.01;
+const int NTRIALS = 12; //No of trials
+const double TIMEOUT = 1;
+const double SCORE_TIMEOUT = 2;
+const double TARGET_DURATION = 0.5;
+const double DUR_TOL = 0.15; // 15% tolerance
+double START_RADIUS=0.005; //start radius 5mm
+double TARGET_RADIUS=0.005; //target radius 5mm
+double VIAPOINT_RADIUS=0.0025; //via point radius of 2.5mm
+double MAX_VIAPOINT_RADIUS=0.02;  // maximum distance at which get a nonzero score, is 2cm
+double CURSOR_RADIUS=0.0025; 
+int viapoint_visible = true;
+
+
+const double Kp = 150.0; // [N/m]
+const double Kb = 0.5;  // [N.s/m]
+
+bool force_enable[NTRIALS];
+//---------------------------------------------------------------------------
+// DECLARED VARIABLES
+//---------------------------------------------------------------------------
+
+// WINDOWS (one per robot)
+// width and height of the current window display
+int displayW  = 1440;
+int displayH  = 900;
+
+int window[MAX_DEVICES];
+
+// WORLDS (one per robot)
+
+// a world that contains all objects of the virtual environment
+cWorld* world[MAX_DEVICES];  // one world per device
+
+// a camera that renders the world in a window display
+cCamera* camera[MAX_DEVICES];
+
+// table containing a list of 3D cursors for each haptic device
+cShapeSphere *cursors[MAX_DEVICES], *starts[MAX_DEVICES], *targets[MAX_DEVICES], *via[MAX_DEVICES];
+
+cShapeLine *forcevectors[MAX_DEVICES];
+
+// a table containing pointers to label which display the position of
+// each haptic device
+cLabel* labels[MAX_DEVICES];
+cLabel * scorelabels[MAX_DEVICES];
+cLabel * poslabels[MAX_DEVICES];
+
+cGenericObject* rootLabels[MAX_DEVICES];
+
+
+
+// Score objects
+Score score1(MAX_VIAPOINT_RADIUS, VIAPOINT_RADIUS, 100), score2(MAX_VIAPOINT_RADIUS, VIAPOINT_RADIUS, 100);  // score is 0 for distance >4 cm and is 100 for distance<1 cm
+
+// HAPTIC DEVICES
+
+// a haptic device handler
+cHapticDeviceHandler* handler;
+
+// a table containing pointers to all haptic devices detected on this computer
+cGenericHapticDevice* hapticDevices[MAX_DEVICES];
+
+
+// number of haptic devices detected
+int numHapticDevices = 0;
+
+int score;
+
+// status of the main simulation haptics loop
+bool simulationRunning = false;
+
+// root resource path
+string resourceRoot;
+
+// damping mode ON/OFF
+bool useDamping = false;
+
+// force field mode ON/OFF
+bool useForceField = false;
+
+// has exited haptics simulation thread
+bool simulationFinished = false;
+
+// Set precision clock
+cPrecisionClock mytimer;
+cPrecisionClock statetimer;
+
+// Define buffer for data logging
+//FILE * pFile, *pFile1;
+const int chunk_size = 1000;
+block_linked_list<DataRecord,chunk_size> data_buffer;
+
+// Set finite state machine
+RobotFsm myFSM;  
+
+//---------------------------------------------------------------------------
+// DECLARED MACROS
+//---------------------------------------------------------------------------
+// convert to resource path
+#define RESOURCE_PATH(p)    (char*)((resourceRoot+string(p)).c_str())
+
+
+//---------------------------------------------------------------------------
+// DECLARED FUNCTIONS
+//---------------------------------------------------------------------------
+
+// Creates graphic world
+void CreateWorld(cWorld*&,cCamera*&,cShapeSphere*&,cShapeSphere*&,cShapeSphere*&,
+	 cShapeSphere*&, cLabel*&,cLabel*&, cShapeLine*&,cLabel*&);
+
+// callback when the window display is resized
+void reshape(int, int);
+
+// main graphics callback
+void updateGraphics1(void);
+void updateGraphics2(void);
+
+// main haptics loop
+void updateHaptics(void);
+
+
+// log data into buffer
+void updateLogging(void);
+
+// flush buffer into file
+void IOflush(void);
+
+// callback when a keyboard key is pressed
+void keySelect(unsigned char, int, int);
+void keySelect1(unsigned char, int, int);
+
+// callback when the right mouse button is pressed to select a menu item
+void menuSelect(int);
+
+// function called before exiting the application
+void close(void);
+
+
+/*int APIENTRY WinMain(HINSTANCE hInstance,
+                     HINSTANCE hPrevInstance,
+                     LPTSTR    lpCmdLine,
+                     int       nCmdShow)*/
+
+int main(array<System::String ^> ^args)
+
+//int main(int argc, char* argv[])
+{
+
+
+   Application::EnableVisualStyles();
+   Application::SetCompatibleTextRenderingDefault(false);
+   Application::Run(gcnew control());
+
+  // MessageBox::Show("Hello World");
+
+	//char fname[30];
+	//char fpath[100]; // file name for logging
+	//char fpath1[100]; // file name for logging
+
+	//disable force field for first half of trial 
+	for(int i=0;i<NTRIALS/4;i++)
+		//force_enable[i]=true;
+	    force_enable[i]=false;
+	for(int i=NTRIALS/4;i<NTRIALS;i++)
+		force_enable[i]=true;
+
+	
+    /*printf ("\n");
+    printf ("-----------------------------------\n");
+    printf ("Dual Haptic Interfacing\n\n");
+    printf ("Modifed by Vinil");
+    printf ("-----------------------------------\n");
+    printf ("\n\n");
+	
+	printf ("File name for logging:");
+	scanf("%s",fname);
+	printf ("\n\n");
+	
+	printf ("[x] - Exit application\n");
+    printf ("\n\n");
+    //double timecheck;
+	//timecheck=mytimer.getCurrentTimeSeconds();
+	printf("FSM time: %f \n\n", myFSM.data.time);
+	//printf("\ntimecheck : %f\n\n", timecheck);*/
+
+    // parse first arg to try and locate resources
+//    resourceRoot = string(argv[0]).substr(0,string(argv[0]).find_last_of("/\\")+1);
+	
+
+
+
+	// enabling file handling, opening a file
+	sprintf(fpath,"%s\\%s.dat",rootdir,fname);
+	
+	pFile = fopen (fpath, "wb");
+
+	sprintf(fpath1,"%s\\%s.pro",rootdir,fname);
+	pFile1 = fopen (fpath1, "w");
+    
+	//-----------------------------------------------------------------------
+    // HAPTIC DEVICES / TOOLS
+    //-----------------------------------------------------------------------
+
+    // create a haptic device handler
+    handler = new cHapticDeviceHandler();
+
+    // read the number of haptic devices currently connected to the computer
+    numHapticDevices = handler->getNumDevices();
+
+    // limit the number of devices to MAX_DEVICES
+    numHapticDevices = cMin(numHapticDevices, MAX_DEVICES);
+
+
+    //-----------------------------------------------------------------------
+    // 3D - SCENEGRAPH
+    //-----------------------------------------------------------------------
+
+
+	//Seperated into two if statements
+	int screenW = glutGet(GLUT_SCREEN_WIDTH);
+    int screenH = glutGet(GLUT_SCREEN_HEIGHT);
+    int windowPosX1 = 0; 
+    int windowPosY1 = 0; 
+	int windowPosX2 = WINDOW_SIZE_W;
+    int windowPosY2 = 0;
+
+	/*glutCreateMenu(menuSelect);
+    glutAddMenuEntry("full screen", OPTION_FULLSCREEN);
+    glutAddMenuEntry("window display", OPTION_WINDOWDISPLAY);
+    glutAttachMenu(GLUT_RIGHT_BUTTON);*/
+
+
+    
+	glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE);
+    glutInitWindowSize (WINDOW_SIZE_W/2, WINDOW_SIZE_H/2);
+   
+	//glutInitWindowPosition (windowPosX, windowPosY);
+
+	mytimer.start(true);  // start clock after reset to zero...
+	statetimer.start(true);
+    
+	int i = 0;
+    while (i < numHapticDevices){    // loop over haptic devices
+		 
+		
+        // get a handle to the next haptic device
+        cGenericHapticDevice* newHapticDevice;
+
+        handler->getDevice(newHapticDevice, i);
+		printf("index number of device-> %d \n\n", i);
+		
+        // open connection to haptic device
+        newHapticDevice->open();
+
+		// initialize haptic device
+		newHapticDevice->initialize();
+
+        // store the handle in the haptic device table
+        hapticDevices[i] = newHapticDevice;
+
+        // retrieve information about the current haptic device
+        cHapticDeviceInfo info = newHapticDevice->getSpecifications();
+
+    	CreateWorld(world[i],camera[i],cursors[i],starts[i],targets[i],via[i],labels[i],scorelabels[i]
+		,forcevectors[i],poslabels[i]);   
+		char str[30];
+		sprintf(str,"ROBOT %d",i);
+		window[i] = glutCreateWindow (str);
+		//
+
+		
+		///
+		if (i==0) {
+			glutInitWindowPosition (windowPosX1, windowPosY1);
+			glutDisplayFunc(updateGraphics1);
+		}
+		else { 
+			glutInitWindowPosition (windowPosX2, windowPosY2);
+			glutDisplayFunc(updateGraphics2);
+		}
+		glutReshapeFunc(reshape);
+		
+		glutKeyboardFunc(keySelect);
+
+		// window modification
+
+		//glutKeyboardFunc(keySelect1);
+		i++;
+    }
+
+	// Different VIA Points!!!
+	via[0]->setPos(cVector3d( 0, 0.02, 0.03));
+	//via[1]->setPos(cVector3d( 0, -0.02, 0.03));
+	via[1]->setPos(cVector3d( 0, -0.02, -0.03));
+	
+
+
+	//printf("FL=%f\n",camera[0]->getStereoFocalLength());
+	//printf("FVA=%f\n",camera[1]->getFieldViewAngle());
+
+    //GLUT window settings for maximize and position each window 
+	/*HWND window0 = FindWindow(NULL, "ROBOT 0");
+	SetWindowLong(window0,  GWL_STYLE, WS_POPUP | WS_MAXIMIZE);
+    SetWindowPos(window0, HWND_NOTOPMOST, -1440, 0, 1440, 900, SWP_SHOWWINDOW);
+
+	
+	HWND window1 = FindWindow(NULL, "ROBOT 1");
+	SetWindowLong(window1, GWL_STYLE, WS_POPUP | WS_MAXIMIZE);
+    SetWindowPos(window1, HWND_NOTOPMOST, 0, 0, 1440, 900, SWP_SHOWWINDOW);*/
+	
+
+
+    //-----------------------------------------------------------------------
+    // START SIMULATION
+    //-----------------------------------------------------------------------
+
+    // simulation in now running
+    simulationRunning = true;
+
+    // create a thread which starts the main haptics rendering loop
+    cThread* hapticsThread = new cThread();
+    hapticsThread->set(updateHaptics, CHAI_THREAD_PRIORITY_HAPTICS);
+
+
+	// This is to periodically log data (time, position, force, state) on a buffer
+	cThread* loggingThread = new cThread();
+    loggingThread->set(updateLogging, CHAI_THREAD_PRIORITY_HAPTICS);
+
+	// This is to flush data on a file
+	cThread* IOThread = new cThread();
+    IOThread->set(IOflush, CHAI_THREAD_PRIORITY_GRAPHICS);
+
+    // start the main graphics rendering loop
+    glutMainLoop();
+    
+    mytimer.stop();
+
+	statetimer.stop();
+
+    // close everything
+    close();
+
+	// close the data file
+	fclose(pFile);
+	fclose(pFile1);
+	
+    // exit
+    return (0);
+}
+
+
+//---------------------------------------------------------------------------
+
+void keySelect(unsigned char key, int x, int f)
+{
+    // escape key
+    if ((key == 27) || (key == 'x'))
+    {
+        // close everything
+        close();
+
+        // exit application
+        exit(0);
+    }
+	 
+	if (key == 'f')
+    {
+    HWND window0 = FindWindow(NULL, "ROBOT 0");
+	SetWindowLong(window0,  GWL_STYLE, WS_POPUP | WS_MAXIMIZE);
+    SetWindowPos(window0, HWND_NOTOPMOST, -1440, 0, 1440, 900, SWP_SHOWWINDOW);
+
+	
+	HWND window1 = FindWindow(NULL, "ROBOT 1");
+	SetWindowLong(window1, GWL_STYLE, WS_POPUP | WS_MAXIMIZE);
+    SetWindowPos(window1, HWND_NOTOPMOST, 0, 0, 1440, 900, SWP_SHOWWINDOW);
+	
+    }
+    
+}
+
+
+
+
+//---------------------------------------------------------------------------
+
+void menuSelect(int value)
+{
+    switch (value)
+    {
+        // enable full screen display
+        case OPTION_FULLSCREEN:
+            glutFullScreen();
+            break;
+
+        // reshape window to original size
+        case OPTION_WINDOWDISPLAY:
+            glutReshapeWindow(WINDOW_SIZE_W, WINDOW_SIZE_H);
+            break;
+    }
+}
+
+//---------------------------------------------------------------------------
+
+void close(void)
+{
+    // stop the simulation
+    simulationRunning = false;
+
+    // wait for graphics and haptics loops to terminate
+    while (!simulationFinished) { cSleepMs(100); }
+
+    // close all haptic devices
+    int i=0;
+    while (i < numHapticDevices)
+    {
+        hapticDevices[i]->close();
+        i++;
+    }
+}
+
+//---------------------------------------------------------------------------
+
+void updateGraphics1(void){
+	 const int deviceID=0;
+	cMaterial mat;
+	cMaterial mat0;
+	
+    // update content of position label
+    
+        // read position of device an convert into millimeters
+        cVector3d pos1;
+		hapticDevices[deviceID]->getPosition(pos1);
+        pos1.mul(1000);
+		string devpos1;
+	//	cStr(devpos1, deviceID);
+		string devLabel1 =" Cursor depth" + devpos1 + "  : " ;
+		cStr(devLabel1, pos1.x,2);
+		
+		poslabels [0] -> m_string = devLabel1;
+
+		//States state = myFSM.GetState();
+		//labels[0]-> m_string = StateToLabel(state);
+
+
+
+    // get state of Finite State Machine
+		 States state = myFSM.GetState();
+
+		//States state = myFSM.GetState();
+
+		//string strLabel = "Instruction : ";
+		string strLabel;
+		switch(state){
+		case Begin:
+		strLabel = "Get Ready!!..place your cursor on Start!";
+		break;
+		case OnStart:
+		strLabel = "Now you can move the cursor to the target!!";
+		break;
+		case Started:
+		strLabel = "Now you can move the cursor to the target!!";
+		break;
+		case Moving:
+		strLabel = "Now you can move the cursor to the target!!";
+		break;
+		case DisplayScore:
+		strLabel = " GOOD JOB!!!...Now move back to the start!!"; 
+		break;
+		case End:
+		strLabel = "END of TRIAL!!";
+		break;
+        }
+
+
+        labels[deviceID]->m_string = strLabel;  
+		 
+    
+	scorelabels[deviceID]->m_string = "SCORE: ";
+	cStr(scorelabels[deviceID]->m_string, score1.get());
+	
+	targets[deviceID]->setShowEnabled(myFSM.data.target_on);
+	starts[deviceID]->setShowEnabled(myFSM.data.start_on);
+	//via[deviceID]->setShowEnabled(myFSM.data.target_on); //Provision for visible and hidden via point
+
+	if (state==DisplayScore){
+			//if (myFSM.data.duration >TARGET_DURATION*(1-DUR_TOL) && myFSM.data.duration<TARGET_DURATION*(1+DUR_TOL))  
+		if (myFSM.data.duration > 0.5 && myFSM.data.duration < 2)
+				mat.m_diffuse.set(0, 1, 0);
+			else mat.m_diffuse.set(1, 0, 0);
+		}
+	else mat.m_diffuse.set(1, 1, 0);
+	targets[deviceID]->setMaterial(mat);
+
+	if (pos1.x>24.0)
+	mat0.m_diffuse.set(0, 1, 0);
+	else
+	mat0.m_diffuse.set(1, 0, 0);
+	cursors[deviceID]->setMaterial(mat0);
+		
+    // render world
+    camera[deviceID]->renderView(displayW, displayH);
+
+    // Swap buffers
+    glutSwapBuffers();
+
+    // check for any OpenGL errors
+    GLenum err;
+    err = glGetError();
+    if (err != GL_NO_ERROR) printf("Error:  %s\n", gluErrorString(err));
+
+    // inform the GLUT window to call updateGraphics again (next frame)
+    if (simulationRunning)
+    {
+        glutPostRedisplay();
+    }
+}
+
+
+void updateGraphics2 (void){
+     const int deviceID=1;
+	 cMaterial mat;
+	 cMaterial mat0;
+	
+	
+    // update content of position label
+    
+        // read position of device an convert into millimeters
+        cVector3d pos2;
+		hapticDevices[deviceID]->getPosition(pos2);
+        pos2.mul(1000);
+		string devpos2;
+		//cStr(devpos2, deviceID);
+		string devLabel2 ="Cursor depth" + devpos2 + "  : " ;
+		cStr(devLabel2, pos2.x,2);
+		
+		poslabels [1] -> m_string = devLabel2;
+
+    // get state of Finite State Machine
+		States state = myFSM.GetState();
+		
+		//string strLabel = "Instruction : ";
+		string strLabel;
+		switch(state){
+		case Begin:
+		strLabel = "Get Ready!!..place your cursor on Start! ";
+		break;
+		case OnStart:
+		strLabel = "Now you can move the cursor to the target!!";
+		break;
+		case Started:
+		strLabel = "Now you can move the cursor to the target!!";
+		break;
+		case Moving:
+		strLabel = "Now you can move the cursor to the target!!";
+		break;
+		
+		case DisplayScore: 
+		strLabel = " GOOD JOB!!!...Now move back to the start!!"; 
+		break;
+		case End: 
+		strLabel = "END of TRIAL!!";
+		break;
+        }
+
+        labels[deviceID]->m_string = strLabel; 
+
+		scorelabels[deviceID]->m_string = "SCORE: ";
+		cStr(scorelabels[deviceID]->m_string, score2.get());
+	
+        targets[deviceID]->setShowEnabled(myFSM.data.target_on);
+	    starts[deviceID]->setShowEnabled(myFSM.data.start_on);
+		//via[deviceID]->setShowEnabled(myFSM.data.target_on); //Provision for visible and hidden via point
+
+		if (state==DisplayScore){
+			//if (myFSM.data.duration >TARGET_DURATION*(1-DUR_TOL) && myFSM.data.duration<TARGET_DURATION*(1+DUR_TOL))
+			if (myFSM.data.duration > 0.5 && myFSM.data.duration < 2)
+				 mat.m_diffuse.set(0, 1, 0);
+			else mat.m_diffuse.set(1, 0, 0);
+		}
+		else mat.m_diffuse.set(1, 1, 0);
+		targets[deviceID]->setMaterial(mat);
+	
+	   if (pos2.x>24.0)
+	   mat0.m_diffuse.set(0, 1, 0);
+	   else
+	   mat0.m_diffuse.set(1, 0, 0);
+	   cursors[deviceID]->setMaterial(mat0);
+
+    // render world
+        camera[deviceID]->renderView(displayW, displayH);
+
+    // Swap buffers
+    glutSwapBuffers();
+
+    // check for any OpenGL errors
+    GLenum err;
+    err = glGetError();
+    if (err != GL_NO_ERROR) printf("Error:  %s\n", gluErrorString(err));
+
+    // inform the GLUT window to call updateGraphics again (next frame)
+    if (simulationRunning)
+    {
+        glutPostRedisplay();
+    }
+}
+
+// Data logging thread
+void updateLogging(void)
+{
+    // Get time stamp and subtract from initial time
+	double time;
+	cVector3d position[2];
+    cVector3d force[2];
+	States state;
+
+	while(simulationRunning)
+    {
+		time= mytimer.getCurrentTimeSeconds();
+		//time= statetimer.getCurrentTimeSeconds();
+		state = myFSM.GetState();
+		for(int i=0;i<2;i++){
+			hapticDevices[i]->getPosition(position[i]);
+			hapticDevices[i]->getForce(force[i]);
+		}
+
+		DataRecord data(time,position,force,static_cast<int>(state));
+        data_buffer.push_back(data);
+
+#ifdef _WIN32
+        //Sleep(1000/sampling_rate); // Time is in ms...
+		cSleepMs(1000/sampling_rate);
+#else
+        usleep(1000000/sampling_rate); // Time is in us...
+#endif
+		
+
+	}   
+	simulationFinished = true;
+}
+
+// Thread to write on file
+void IOflush(void)
+{
+    
+	while(simulationRunning)
+    {
+	    data_buffer.safe_flush(pFile);
+
+		
+	}   
+	data_buffer.flush(pFile);
+	simulationFinished = true;
+}
+
+
+
+
+
+//---------------------------------------------------------------------------
+
+void updateHaptics(void)
+{
+
+	cVector3d  newPosition1,newPosition2;
+	cMatrix3d newRotation1, newRotation2;
+
+	cVector3d startPosition1, startPosition2;
+	cVector3d targetPosition1, targetPosition2;
+
+	cVector3d viaPosition1, viaPosition2;
+
+	cVector3d linearVelocity1, linearVelocity2;
+	static int num1=0;
+	static double intdist;
+
+
+    // main haptic simulation loop
+    while(simulationRunning)
+    {
+        // for each device
+        
+            // read position of haptic devices 1,2
+            hapticDevices[0]->getPosition(newPosition1);
+			hapticDevices[1]->getPosition(newPosition2);
+
+            // read orientation of haptic devices 1, 2
+           
+            hapticDevices[0]->getRotation(newRotation1);
+			hapticDevices[1]->getRotation(newRotation2);
+
+            // read linear velocity from devices 1,2
+          	hapticDevices[0]->getLinearVelocity(linearVelocity1);
+			hapticDevices[1]->getLinearVelocity(linearVelocity2);
+			linearVelocity1.x=0;
+			linearVelocity2.x=0;
+
+            // update position and orientation of cursors
+            cursors[0]->setPos(newPosition1);
+			cursors[1]->setPos(newPosition2);
+			cursors[0]->setRot(newRotation1);
+		    cursors[1]->setRot(newRotation2);
+
+			startPosition1=starts[0]->getPos();
+			startPosition2=starts[1]->getPos();
+
+			targetPosition1=targets[0]->getPos();
+			targetPosition2=targets[1]->getPos();
+
+	        viaPosition1 = via[0]->getPos();
+		    viaPosition2 = via[1]->getPos();
+
+            //distance from an invisible via point
+			
+			viadist1 =  
+				    (newPosition1.y - viaPosition1.y)*(newPosition1.y - viaPosition1.y)+
+					(newPosition1.z - viaPosition1.z)*(newPosition1.z - viaPosition1.z);
+			if (viadist1 < minviadist1)
+				minviadist1 = viadist1;
+
+			viadist2 =  
+				    (newPosition2.y - viaPosition2.y)*(newPosition2.y - viaPosition2.y)+
+					(newPosition2.z - viaPosition2.z)*(newPosition2.z - viaPosition2.z);
+			if (viadist2 < minviadist2)
+				minviadist2 = viadist2;
+
+	
+			dist1 = //(newPosition1.x - startPosition1.x)*(newPosition1.x - startPosition1.x)+
+				    (newPosition1.y - startPosition1.y)*(newPosition1.y - startPosition1.y)+
+					(newPosition1.z - startPosition1.z)*(newPosition1.z - startPosition1.z);
+
+            dist2 = //(newPosition2.x - startPosition2.x)*(newPosition2.x - startPosition2.x)+
+				    (newPosition2.y - startPosition2.y)*(newPosition2.y - startPosition2.y)+
+					(newPosition2.z - startPosition2.z)*(newPosition2.z - startPosition2.z);
+
+           
+
+
+			
+			
+		    if(myFSM.GetState()==Stopping){
+				    myFSM->ToDisplay()
+			   }
+
+			
+			if(myFSM.GetState()==EndTrial){
+			    // here save trial data on file
+				fprintf(pFile1,"%d\t%d\t%d\t%d\t%d\n",
+					myFSM.data.trial, 
+					score1.get(), 
+					score2.get(), 
+					force_enable[myFSM.data.trial],
+					viapoint_visible);
+				
+			
+				}
+				else myFSM->ToEnd();
+			}
+
+			if (myFSM.GetState()==OnStart){
+				meandist=0.0;
+				num1=0;
+			}
+			
+			
+		    if (myFSM.GetState()==Started || myFSM.GetState()==Moving ||  myFSM.GetState()==Stopping  ){
+				meandist+=intdist;
+			    num1++;
+			}
+
+          
+		
+
+			 // update arrow
+            forcevectors[0]->m_pointA = newPosition1;
+            forcevectors[0]->m_pointB = cAdd(newPosition1, 0.005*newForce1);
+			
+		
+			
+	
+			forcevectors[1]->m_pointA = newPosition2;
+            forcevectors[1]->m_pointB = cAdd(newPosition2, 0.005*newForce2);
+
+		   
+
+	}
+    // exit haptics thread
+    simulationFinished = true;
+}
